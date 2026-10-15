@@ -40,25 +40,34 @@ jobs:
 
           # 扫描主机密钥（指定端口）
           ssh-keyscan -p "${{ secrets.TOUGE_SERVER_PORT }}" -H "${{ secrets.TOUGE_SERVER_IP }}" >> ~/.ssh/known_hosts 2>/dev/null || true
-          echo "SSH环境配置完成，尝试连接服务器..."
 
-          ssh -v \
-            -p "${{ secrets.TOUGE_SERVER_PORT }}" \
-            -o HostKeyAlgorithms=+ssh-rsa \
-            -o PubkeyAcceptedAlgorithms=+ssh-rsa \
-            -o StrictHostKeyChecking=accept-new \
-            root@"${{ secrets.TOUGE_SERVER_IP }}" << 'EOF'
+          PORT="${{ secrets.TOUGE_SERVER_PORT }}"
+          COMMON_OPTS="-o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
+          REMOTE=root@"${{ secrets.TOUGE_SERVER_IP }}"
+
+          # 打包已检出的代码（不含 .git / 虚拟环境 / 缓存）
+          tar czf /tmp/app.tar.gz \
+            --exclude=.git --exclude=.venv --exclude=__pycache__ --exclude=.pytest_cache \
+            -C . .
+
+          echo "代码打包完成，传输到头歌服务器..."
+          # 由 runner 推送代码，避免依赖服务器出网到 GitHub（头歌沙箱对 github.com 访问不稳定）
+          scp $COMMON_OPTS -P "$PORT" /tmp/app.tar.gz "$REMOTE":/tmp/app.tar.gz
+
+          # 连接服务器执行部署
+          ssh $COMMON_OPTS -p "$PORT" "$REMOTE" << 'EOF'
             set -e
             echo "成功连接服务器：$(whoami)@$(hostname)"
 
             cd /root/flask-web-app || { echo "项目目录不存在"; exit 1; }
-            git pull origin main || { echo "Git拉取失败"; exit 1; }
+            tar xzf /tmp/app.tar.gz
 
-            pip3 install --upgrade pip
-            pip3 install -r requirements.txt || { echo "依赖安装失败"; exit 1; }
+            pip3 install --retries 10 -r requirements.txt || { echo "依赖安装失败"; exit 1; }
 
             supervisorctl restart flask-web-app || { echo "应用重启失败"; exit 1; }
+            sleep 2
             supervisorctl status flask-web-app
+            curl -sS http://127.0.0.1:5000/ && echo
             echo "部署完成"
           EOF
         env:
